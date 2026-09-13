@@ -18,7 +18,8 @@ its own `app/*.py` shim.
 
 ## Modules
 
-- `auth` — single-user HTTP Basic Auth middleware with a brute-force lockout guard.
+- `auth` — HTTP Basic Auth middleware (single shared password or multi-user, pluggable) with a brute-force lockout guard.
+- `users` / `passwords` — multi-user account store: a `UserMixin` for each app's own model, plus create/authenticate/change-password/delete helpers backed by stdlib PBKDF2 hashing.
 - `cors` — CORS middleware whose allowed-origins list can change at runtime.
 - `db` — SQLAlchemy engine/session/declarative-base factory.
 - `revisions` — episode revision snapshotting (bounded undo trail).
@@ -51,13 +52,20 @@ engine, SessionLocal, Base, get_db = _db.engine, _db.SessionLocal, _db.Base, _db
 ```
 
 ```python
-# app/auth.py
+# app/auth.py — multi-user, backed by a DB table
 from editor_common.auth import make_basic_auth_middleware
-from .config import settings
+from editor_common.users import authenticate_user
+from .db import SessionLocal
+from .models import User
 
-BasicAuthMiddleware = make_basic_auth_middleware(
-    get_credentials=lambda: (settings.admin_username, settings.admin_password),
-)
+def _authenticate(username, password):
+    db = SessionLocal()
+    try:
+        return authenticate_user(db, User, username, password) is not None
+    finally:
+        db.close()
+
+BasicAuthMiddleware = make_basic_auth_middleware(authenticate=_authenticate)
 ```
 
 ```python

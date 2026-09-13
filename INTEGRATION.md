@@ -62,22 +62,90 @@ get_db = _db.get_db
 
 `app/models.py` は今まで通り `from .db import Base` を使い続けられる。
 
-## 2. `app/auth.py`
+## 2. `app/auth.py`（マルチユーザー対応）
 
-**Before**: `BasicAuthMiddleware` クラスをファイル内に直接定義。
+**Before**: 単一の管理者ID/パスワードに対する `BasicAuthMiddleware` をファイル内に直接定義。
 
-**After**
+**After**: HTTP Basic 認証はそのままに、照合先を「固定1組」から「DBのユーザーテーブル」に変更する。
+
+まず `app/models.py` にユーザーテーブルを追加する（両アプリ共通の列は
+`editor_common.users.UserMixin` から継承する）。
 
 ```python
-from editor_common.auth import make_basic_auth_middleware
-from .config import settings
+# app/models.py
+from editor_common.users import UserMixin
+from .db import Base
 
-BasicAuthMiddleware = make_basic_auth_middleware(
-    get_credentials=lambda: (settings.admin_username, settings.admin_password),
-)
+class User(Base, UserMixin):
+    __tablename__ = "users"
+```
+
+Alembic マイグレーションを1本追加してテーブルを作成する
+（`id`, `username`, `password_hash`, `is_admin`, `is_active`, `created_at`）。
+
+```python
+# app/auth.py
+from editor_common.auth import make_basic_auth_middleware
+from editor_common.users import authenticate_user
+from .db import SessionLocal
+from .models import User
+
+def _authenticate(username: str, password: str) -> bool:
+    db = SessionLocal()
+    try:
+        return authenticate_user(db, User, username, password) is not None
+    finally:
+        db.close()
+
+BasicAuthMiddleware = make_basic_auth_middleware(authenticate=_authenticate)
 ```
 
 `main.py` 側の `app.add_middleware(BasicAuthMiddleware)` は変更不要。
+認証を通ったリクエストは `request.state.username` でログイン中のユーザー名を参照できる
+（`make_basic_auth_middleware` が設定する）。
+
+既存の「1組の管理者ID/パスワード」のままにしたい場合は、
+`authenticate` に直接ラムダを渡せば移行不要（`editor_common.auth.single_credential_pair`
+が旧 `get_credentials` 方式からのアダプタとして残っている）。
+
+```python
+from editor_common.auth import make_basic_auth_middleware, single_credential_pair
+from .config import settings
+
+BasicAuthMiddleware = make_basic_auth_middleware(
+    authenticate=single_credential_pair(
+        lambda: (settings.admin_username, settings.admin_password)
+    ),
+)
+```
+
+### ユーザー管理
+
+`editor_common.users` は認証チェックだけでなく作成・パスワード変更・無効化・削除も提供する。
+各アプリはこれを呼ぶだけの管理用エンドポイント（`is_admin` な `request.state.username`
+のみ許可する等の権限判定はアプリ側で行う）か、`python -m` の管理コマンドを用意する。
+
+```python
+from editor_common.users import create_user, change_password, delete_user, list_users, ensure_bootstrap_user
+from .db import SessionLocal
+from .models import User
+
+db = SessionLocal()
+try:
+    # 初回デプロイ時、ユーザーテーブルが空なら管理者を1件だけ自動作成
+    ensure_bootstrap_user(db, User, settings.admin_username, settings.admin_password)
+
+    create_user(db, User, "alice", "correct horse battery staple", is_admin=False)
+    change_password(db, User, "alice", "new-password")
+    list_users(db, User)          # -> [User(username="alice"), ...]
+    delete_user(db, User, "alice")
+finally:
+    db.close()
+```
+
+パスワードは `editor_common.passwords`（stdlib の PBKDF2-HMAC、追加依存なし）で
+ハッシュ化されて保存される。`create_user`/`authenticate_user` を使う限り生パスワードや
+ハッシュを直接扱う必要はない。
 
 ## 3. `app/cors.py`
 
