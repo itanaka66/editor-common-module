@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "editor-common"
+version = "0.1.0"
+description = "Shared FastAPI backend building blocks for integrated_writers_editor and integrated_novel_editor"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "qdrant-client",
+    "sqlalchemy>=2",
+    "starlette",
+]
+
+[tool.setuptools.packages.find]
+include = ["editor_common*"]
