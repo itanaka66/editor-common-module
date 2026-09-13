@@ -147,4 +147,11 @@ def make_basic_auth_middleware(
             request.state.username = username
             return await call_next(request)
 
+    # Exposed for tests: Starlette's TestClient always reports the same
+    # client IP, so failures from one test would otherwise bleed into the
+    # next. Call `BasicAuthMiddleware.reset_rate_limit()` in an autouse
+    # fixture between tests.
+    BasicAuthMiddleware._failures = _failures
+    BasicAuthMiddleware.reset_rate_limit = staticmethod(_failures.clear)
+
     return BasicAuthMiddleware
