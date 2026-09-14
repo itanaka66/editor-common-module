@@ -81,3 +81,7 @@ search = _store.search
 See each module's docstring for the rest of the constructor arguments, and
 [INTEGRATION.md](INTEGRATION.md) for a full file-by-file wiring guide for
 both `integrated_writers_editor` and `integrated_novel_editor`.
+
+## License
+
+[MIT](LICENSE)
