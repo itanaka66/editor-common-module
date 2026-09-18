@@ -18,8 +18,10 @@ its own `app/*.py` shim.
 
 ## Modules
 
-- `auth` — HTTP Basic Auth middleware (single shared password or multi-user, pluggable) with a brute-force lockout guard.
-- `users` / `passwords` — multi-user account store: a `UserMixin` for each app's own model, plus create/authenticate/change-password/delete helpers backed by stdlib PBKDF2 hashing.
+- `auth` — auth middleware: HTTP Basic (single shared password or multi-user, pluggable) with a brute-force lockout guard, optionally combined with a signed session cookie for OAuth2 login.
+- `users` / `passwords` — multi-user account store: a `UserMixin` for each app's own model, plus create/authenticate/change-password/delete helpers backed by stdlib PBKDF2 hashing, plus get-or-create for OAuth2 first-login auto-registration.
+- `oauth` — "Sign in with Google/GitHub": authorization-code OAuth2 client plus ready-to-mount login/callback/logout routes.
+- `session_tokens` — stdlib-only signed session tokens (HMAC, no server-side session table) for the OAuth2 login cookie.
 - `cors` — CORS middleware whose allowed-origins list can change at runtime.
 - `db` — SQLAlchemy engine/session/declarative-base factory.
 - `revisions` — episode revision snapshotting (bounded undo trail).

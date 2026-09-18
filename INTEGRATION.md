@@ -147,6 +147,113 @@ finally:
 ハッシュ化されて保存される。`create_user`/`authenticate_user` を使う限り生パスワードや
 ハッシュを直接扱う必要はない。
 
+### OAuth2ログイン（Google / GitHub）
+
+Basic認証と共存させる形で追加する。ブラウザはOAuth2セッションCookieでログインし、
+CIやスクリプトなど既存のBasic認証クライアントはそのまま動く。
+
+**手順1: `UserMixin` に `email` 列が追加され、`password_hash` がNULL許可になったので、
+Alembicマイグレーションを1本追加する**（OAuth初回ログインで自動作成されるアカウントは
+パスワードを持たない）。
+
+```python
+def upgrade() -> None:
+    op.alter_column('users', 'password_hash', existing_type=sa.String(255), nullable=True)
+    op.add_column('users', sa.Column('email', sa.String(255), nullable=True))
+    op.create_index('ix_users_email', 'users', ['email'], unique=True)
+
+def downgrade() -> None:
+    op.drop_index('ix_users_email', table_name='users')
+    op.drop_column('users', 'email')
+    op.alter_column('users', 'password_hash', existing_type=sa.String(255), nullable=False)
+```
+
+**手順2: `app/config.py` にOAuthクライアント設定とセッション署名用シークレットを追加**する
+（`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/
+`SESSION_SECRET` などの環境変数から読む）。`SESSION_SECRET` は `openssl rand -hex 32` 等で
+生成した値を必ず設定すること（未設定のままだとセッションCookieが空文字列鍵で署名され、
+誰でも偽造できてしまう）。
+
+**手順3: `app/auth.py` をセッションCookie対応版に差し替える**（`make_basic_auth_middleware`
+の代わりに `make_auth_middleware` を使う）。
+
+```python
+# app/auth.py
+from editor_common.auth import make_auth_middleware, make_session_verifier
+from editor_common.users import authenticate_user
+
+from .config import settings
+from .db import SessionLocal
+from .models import User
+
+
+def _authenticate_basic(username: str, password: str) -> bool:
+    db = SessionLocal()
+    try:
+        return authenticate_user(db, User, username, password) is not None
+    finally:
+        db.close()
+
+
+BasicAuthMiddleware = make_auth_middleware(
+    authenticate_basic=_authenticate_basic,
+    verify_session=make_session_verifier(settings.session_secret, SessionLocal, User),
+    # register_oauth_routes に渡す prefix と揃える — ログイン/コールバック自体が
+    # 認証必須になってしまわないようにするため。
+    public_path_prefixes=("/auth",),
+)
+```
+
+**手順4: `app/main.py` でOAuthルートを登録する**（`app.add_middleware(BasicAuthMiddleware)`
+の行はそのまま）。
+
+```python
+# app/main.py
+from editor_common.oauth import register_oauth_routes, google_provider, github_provider
+from editor_common.users import get_or_create_oauth_user
+from .db import SessionLocal
+from .models import User
+
+def _get_or_create_user(email, name):
+    db = SessionLocal()
+    try:
+        return get_or_create_oauth_user(db, User, email, display_name=name)
+    finally:
+        db.close()
+
+providers = {}
+if settings.google_client_id:
+    providers["google"] = google_provider(
+        settings.google_client_id, settings.google_client_secret,
+        redirect_uri=f"{settings.public_base_url}/auth/callback/google",
+    )
+if settings.github_client_id:
+    providers["github"] = github_provider(
+        settings.github_client_id, settings.github_client_secret,
+        redirect_uri=f"{settings.public_base_url}/auth/callback/github",
+    )
+
+if providers:
+    register_oauth_routes(
+        app,
+        providers=providers,
+        session_secret=settings.session_secret,
+        get_or_create_user=_get_or_create_user,
+        session_max_age_seconds=30 * 24 * 3600,
+        on_login_redirect="/",  # フロントエンドのトップページ
+        secure_cookies=not settings.debug,  # ローカル開発 (http://localhost) では False
+    )
+```
+
+これで `GET /auth/login/google`・`GET /auth/login/github` にリンクを張れば
+Googleアカウント/GitHubアカウントでログインでき、初回ログインしたメールアドレスの
+アカウントが自動作成される（メールアドレスが既存ユーザーと一致すれば同じアカウントに
+ログインする、Google/GitHub両方を後から使っても同一アカウントとして扱われる）。
+`GET/POST /auth/logout` でセッションCookieを削除できる。
+
+Google/GitHub側のOAuthアプリ設定で、コールバックURLに
+`https://<公開URL>/auth/callback/google`・`.../auth/callback/github` を登録しておくこと。
+
 ## 3. `app/cors.py`
 
 **After**

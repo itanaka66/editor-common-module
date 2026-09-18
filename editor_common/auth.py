@@ -1,22 +1,10 @@
-"""HTTP Basic Auth gate for a whole FastAPI instance, with a pluggable
-`authenticate` callback so it works for both the original single shared
-admin/password pair and a multi-user DB-backed account store (see
-`editor_common.users`).
+"""Auth gate for a whole FastAPI instance: HTTP Basic Auth (a pluggable
+`authenticate` callback, so it works for a single shared admin/password
+pair or a multi-user DB-backed account store — see `editor_common.users`),
+optionally combined with a signed session cookie for browser/OAuth2 login
+(see `editor_common.oauth` and `editor_common.session_tokens`).
 
-Neither editor has a session/cookie login flow — HTTP Basic keeps the
-browser's own credential prompt/autofill and needs no login page, which
-suited a single shared password. It works just as well for multiple
-accounts: the callback below is asked "is this username/password pair
-valid?" on every request, so swapping in a per-user check is a one-line
-change at the call site (see `editor_common.users.authenticate_user`).
-
-This middleware also carries a simple in-memory brute-force guard, since
-HTTP Basic Auth has no built-in lockout — without it a script could retry
-passwords as fast as the network allows. It is keyed by client IP (not by
-username), so it protects the login endpoint itself regardless of which
-account is being guessed at.
-
-Usage — single shared password (unchanged from before)::
+Usage — Basic Auth only, single shared password (unchanged from before)::
 
     from editor_common.auth import make_basic_auth_middleware
 
@@ -24,7 +12,7 @@ Usage — single shared password (unchanged from before)::
         authenticate=lambda u, p: u == settings.admin_username and p == settings.admin_password,
     )
 
-Usage — multiple DB-backed accounts::
+Usage — Basic Auth only, multiple DB-backed accounts::
 
     from editor_common.auth import make_basic_auth_middleware
     from editor_common.users import authenticate_user
@@ -39,6 +27,19 @@ Usage — multiple DB-backed accounts::
             db.close()
 
     BasicAuthMiddleware = make_basic_auth_middleware(authenticate=_authenticate)
+
+Usage — session cookie (OAuth2 login) *and* Basic Auth (e.g. for scripts/CI)
+side by side; a valid session cookie is tried first, Basic Auth is the
+fallback::
+
+    from editor_common.auth import make_auth_middleware, make_session_verifier
+    from .db import SessionLocal
+    from .models import User
+
+    AuthMiddleware = make_auth_middleware(
+        authenticate_basic=_authenticate,
+        verify_session=make_session_verifier(settings.session_secret, SessionLocal, User),
+    )
 """
 import base64
 import logging
@@ -57,6 +58,8 @@ logger = logging.getLogger(__name__)
 FAILURE_WINDOW_SECONDS = 300
 MAX_FAILURES = 10
 LOCKOUT_SECONDS = 300
+
+DEFAULT_SESSION_COOKIE_NAME = "session"
 
 
 def _unauthorized(retry_after: int | None = None) -> Response:
@@ -80,8 +83,8 @@ def single_credential_pair(get_credentials: Callable[[], tuple[str, str]]) -> Ca
     """Adapts the old `get_credentials() -> (username, password)` shape
     (one fixed shared pair, re-read on every call so a live settings
     override still works) into the `authenticate(username, password)`
-    callback `make_basic_auth_middleware` expects. Kept for callers that
-    have not moved to a multi-user account store."""
+    callback these middlewares expect. Kept for callers that have not moved
+    to a multi-user account store."""
 
     def authenticate(username: str, password: str) -> bool:
         admin_username, admin_password = get_credentials()
@@ -90,30 +93,94 @@ def single_credential_pair(get_credentials: Callable[[], tuple[str, str]]) -> Ca
     return authenticate
 
 
-def make_basic_auth_middleware(
-    authenticate: Callable[[str, str], bool],
+def make_session_verifier(secret: str, session_factory: Callable, user_model: type) -> Callable[[str], str | None]:
+    """Builds a `verify_session(token) -> username | None` callback for
+    `make_auth_middleware`, backed by a signed cookie from
+    `editor_common.session_tokens` (as set by `editor_common.oauth`'s login
+    routes) and a fresh DB lookup on every call — so a deactivated account
+    (`is_active=False`) or a deleted user stops working immediately, not
+    only after the cookie itself expires.
+    """
+    from . import session_tokens
+
+    def verify_session(token: str) -> str | None:
+        payload = session_tokens.verify(secret, token)
+        if not payload:
+            return None
+        uid = payload.get("uid")
+        if uid is None:
+            return None
+        db = session_factory()
+        try:
+            user = db.get(user_model, uid)
+        finally:
+            db.close()
+        if user is None or not getattr(user, "is_active", True):
+            return None
+        return user.username
+
+    return verify_session
+
+
+def make_auth_middleware(
+    *,
+    authenticate_basic: Callable[[str, str], bool] | None = None,
+    verify_session: Callable[[str], str | None] | None = None,
+    session_cookie_name: str = DEFAULT_SESSION_COOKIE_NAME,
     public_paths: Iterable[str] = ("/api/v1/health", "/docs", "/openapi.json", "/redoc"),
+    public_path_prefixes: Iterable[str] = (),
     failure_window_seconds: int = FAILURE_WINDOW_SECONDS,
     max_failures: int = MAX_FAILURES,
     lockout_seconds: int = LOCKOUT_SECONDS,
 ):
-    """Builds a `BasicAuthMiddleware` class that checks each request's
-    credentials with `authenticate(username, password) -> bool`.
+    """Builds an auth middleware class that accepts either a valid session
+    cookie (checked first, via `verify_session`, typically
+    `make_session_verifier(...)`) or HTTP Basic credentials (via
+    `authenticate_basic`) — pass either or both. At least one must be given.
 
-    `authenticate` is called on every request (nothing here caches it), so
-    a DB-backed check sees newly-created/deleted users and changed
-    passwords immediately — no restart needed.
+    `public_path_prefixes` is for route *families* rather than one fixed
+    path — most notably `editor_common.oauth`'s login/callback/logout
+    routes, which must stay reachable without a session cookie (that's the
+    whole point) and include a `{provider}` path segment `public_paths`
+    can't match. Pass the same `prefix` given to `register_oauth_routes`
+    (default `"/auth"`) here, e.g. `public_path_prefixes=("/auth",)`.
+
+    The brute-force guard (see module docstring) only ever applies to the
+    Basic Auth path; a session cookie is either valid or it isn't, and
+    forging one requires the signing secret, not guessable attempts.
     """
+    if authenticate_basic is None and verify_session is None:
+        raise ValueError("make_auth_middleware needs at least one of authenticate_basic, verify_session")
+
     public_paths = set(public_paths)
+    public_path_prefixes = tuple(public_path_prefixes)
     _failures: dict[str, list[float]] = defaultdict(list)
+
+    def _is_public(path: str) -> bool:
+        return path in public_paths or path.startswith(public_path_prefixes)
 
     def _prune(timestamps: list[float], now: float) -> list[float]:
         return [t for t in timestamps if now - t < failure_window_seconds]
 
-    class BasicAuthMiddleware(BaseHTTPMiddleware):
+    class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
-            if request.method == "OPTIONS" or request.url.path in public_paths:
+            if request.method == "OPTIONS" or _is_public(request.url.path):
                 return await call_next(request)
+
+            if verify_session is not None:
+                token = request.cookies.get(session_cookie_name)
+                if token:
+                    try:
+                        username = verify_session(token)
+                    except Exception:
+                        logger.exception("verify_session() raised; falling back to Basic Auth")
+                        username = None
+                    if username:
+                        request.state.username = username
+                        return await call_next(request)
+
+            if authenticate_basic is None:
+                return _unauthorized()
 
             ip = _client_ip(request)
             now = time.time()
@@ -136,9 +203,9 @@ def make_basic_auth_middleware(
                 return _unauthorized()
 
             try:
-                ok = authenticate(username, password)
+                ok = authenticate_basic(username, password)
             except Exception:
-                logger.exception("authenticate() raised; treating as failed login")
+                logger.exception("authenticate_basic() raised; treating as failed login")
                 ok = False
             if not ok:
                 _failures[ip].append(now)
@@ -149,9 +216,29 @@ def make_basic_auth_middleware(
 
     # Exposed for tests: Starlette's TestClient always reports the same
     # client IP, so failures from one test would otherwise bleed into the
-    # next. Call `BasicAuthMiddleware.reset_rate_limit()` in an autouse
-    # fixture between tests.
-    BasicAuthMiddleware._failures = _failures
-    BasicAuthMiddleware.reset_rate_limit = staticmethod(_failures.clear)
+    # next. Call `AuthMiddleware.reset_rate_limit()` in an autouse fixture
+    # between tests.
+    AuthMiddleware._failures = _failures
+    AuthMiddleware.reset_rate_limit = staticmethod(_failures.clear)
 
-    return BasicAuthMiddleware
+    return AuthMiddleware
+
+
+def make_basic_auth_middleware(
+    authenticate: Callable[[str, str], bool],
+    public_paths: Iterable[str] = ("/api/v1/health", "/docs", "/openapi.json", "/redoc"),
+    failure_window_seconds: int = FAILURE_WINDOW_SECONDS,
+    max_failures: int = MAX_FAILURES,
+    lockout_seconds: int = LOCKOUT_SECONDS,
+):
+    """Basic-Auth-only convenience wrapper around `make_auth_middleware` —
+    kept as the simple entry point for callers that don't need session-cookie
+    (OAuth2) login. See its docstring for the `authenticate` contract.
+    """
+    return make_auth_middleware(
+        authenticate_basic=authenticate,
+        public_paths=public_paths,
+        failure_window_seconds=failure_window_seconds,
+        max_failures=max_failures,
+        lockout_seconds=lockout_seconds,
+    )
