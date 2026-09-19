@@ -63,7 +63,13 @@ DEFAULT_SESSION_COOKIE_NAME = "session"
 
 
 def _unauthorized(retry_after: int | None = None) -> Response:
-    headers = {"WWW-Authenticate": "Basic"}
+    # Deliberately omits WWW-Authenticate: Basic. Every consumer of this
+    # middleware is a JSON API called from a custom SPA login form, never a
+    # plain browser navigation expecting the browser's own credential
+    # prompt — but browsers pop that native dialog on ANY 401 carrying this
+    # header, on top of the page, hijacking the SPA's own login UI and error
+    # message the instant a login attempt fails.
+    headers = {}
     if retry_after is not None:
         headers["Retry-After"] = str(retry_after)
     return Response(
