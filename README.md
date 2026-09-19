@@ -63,6 +63,40 @@ When installing via `requirements.txt`, either add these flags to the whole
 pin the git ref to a specific commit SHA (`@<commit-sha>` in the URL) and
 bump that SHA on each intentional upgrade instead.
 
+### Updating inside Docker
+
+Neither consuming app's Dockerfile runs `pip install` at container start —
+`requirements.txt` (including this package's `git+https://` line) is
+installed once, at **image build time**, and baked into the image:
+
+```dockerfile
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt   # build time only
+...
+CMD alembic upgrade head && uvicorn app.main:app ...  # never re-installs
+```
+
+So restarting the container (`docker compose up`, `docker restart`) never
+picks up a new commit here — it's still running whatever was in the image.
+Worse, a plain `docker compose build` usually **won't** either: Docker
+caches the `RUN pip install` layer keyed on `requirements.txt`'s *text*,
+which hasn't changed just because this repo got new commits (the
+`git+https://...` line is unpinned, so its text is the same before and
+after). The layer cache hits, `pip install` doesn't even run, and the image
+keeps the old `editor_common`.
+
+To force a rebuild that actually re-fetches this package:
+
+```bash
+docker compose build --no-cache api      # or the app's service name
+docker compose up -d --build
+```
+
+The more reliable fix is pinning `requirements.txt`'s line to a commit SHA
+(as suggested above) and bumping that SHA on each intentional upgrade —
+then the line's text genuinely changes, so Docker's normal layer-cache
+invalidation (no `--no-cache` needed) does the right thing on its own.
+
 ## Usage sketch
 
 ```python

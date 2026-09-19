@@ -24,6 +24,25 @@ dependencies = [
 pip install -e apps/api
 ```
 
+**アップデート時の注意**: `editor-common` は `pyproject.toml` の
+`version` を上げずにコミットを重ねる運用なので、`pip install` を
+そのまま再実行しても更新されない（既に同名パッケージが入っていると
+pipがスキップする）。ローカル/CIでは
+
+```bash
+pip install --upgrade --force-reinstall --no-deps "editor-common @ git+https://github.com/itanaka66/editor-common-module.git"
+```
+
+が必要。**Dockerの場合はさらに注意が必要**で、両アプリの
+`Dockerfile` は `requirements.txt` を**イメージビルド時に1回だけ**
+`pip install` しており、コンテナ再起動では絶対に反映されない。加えて
+`requirements.txt` の該当行（`git+https://...`、コミット未固定）が
+テキストとして変わらない限り Docker のレイヤーキャッシュが効いて
+`docker compose build` すら再取得しないため、
+`docker compose build --no-cache <サービス名>` を使うか、
+コミットSHAを直接 `requirements.txt` に書いて更新のたびに
+そのSHAを書き換える運用にする（後者ならキャッシュも正しく効く）。
+
 ## 1. `app/db.py`
 
 **Before**（両アプリでほぼ同一）
