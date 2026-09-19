@@ -41,28 +41,35 @@ async def _post_with_retry(url, json, timeout):
     raise last_error
 
 
-async def generate(prompt, model, url, timeout=240):
+def _payload(model, prompt, stream, options):
+    payload = {'model': model, 'prompt': prompt, 'stream': stream}
+    if options:
+        payload['options'] = options
+    return payload
+
+
+async def generate(prompt, model, url, timeout=240, options=None):
     base = url.rstrip('/')
-    r = await _post_with_retry(base + '/api/generate', {'model': model, 'prompt': prompt, 'stream': False}, timeout)
+    r = await _post_with_retry(base + '/api/generate', _payload(model, prompt, False, options), timeout)
     return r.json().get('response', ''), model
 
 
-async def generate_with_usage(prompt, model, url, timeout=240):
+async def generate_with_usage(prompt, model, url, timeout=240, options=None):
     """Same as generate(), but also returns Ollama's own token counts
     (prompt_eval_count/eval_count) so callers can log usage."""
     base = url.rstrip('/')
-    r = await _post_with_retry(base + '/api/generate', {'model': model, 'prompt': prompt, 'stream': False}, timeout)
+    r = await _post_with_retry(base + '/api/generate', _payload(model, prompt, False, options), timeout)
     data = r.json()
     usage = {'input_tokens': data.get('prompt_eval_count'), 'output_tokens': data.get('eval_count')}
     return data.get('response', ''), model, usage
 
 
-async def stream_generate(prompt, model, url, timeout=240):
+async def stream_generate(prompt, model, url, timeout=240, options=None):
     """Yields response text deltas as they arrive, then a final usage dict."""
     base = url.rstrip('/')
     usage = {'input_tokens': None, 'output_tokens': None}
     async with httpx.AsyncClient(timeout=timeout) as c:
-        async with c.stream('POST', base + '/api/generate', json={'model': model, 'prompt': prompt, 'stream': True}) as r:
+        async with c.stream('POST', base + '/api/generate', json=_payload(model, prompt, True, options)) as r:
             r.raise_for_status()
             async for line in r.aiter_lines():
                 if not line:
