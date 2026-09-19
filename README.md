@@ -42,6 +42,27 @@ pip install "editor-common @ git+https://github.com/itanaka66/editor-common-modu
 
 or add it as a path/git dependency in `pyproject.toml`/`requirements.txt`.
 
+### Updating
+
+This package isn't tagged/versioned per release (`pyproject.toml` stays at
+`0.1.0`), so a plain `pip install` of the line above **will not** pick up new
+commits once it's already installed — pip sees a package named
+`editor-common` already satisfying the requirement and skips it, without
+checking whether `main` has moved. Always force it:
+
+```bash
+pip install --upgrade --force-reinstall --no-deps "editor-common @ git+https://github.com/itanaka66/editor-common-module.git"
+```
+
+- `--upgrade` — re-resolve/reinstall even though something already satisfies the name
+- `--force-reinstall` — the actual fix: reinstall even when pip thinks the version (unchanged at `0.1.0`) already matches
+- `--no-deps` — skip re-resolving this package's own dependencies (httpx/qdrant-client/sqlalchemy/starlette), which haven't changed
+
+When installing via `requirements.txt`, either add these flags to the whole
+`pip install -r requirements.txt` invocation in your deploy/CI script, or
+pin the git ref to a specific commit SHA (`@<commit-sha>` in the URL) and
+bump that SHA on each intentional upgrade instead.
+
 ## Usage sketch
 
 ```python
