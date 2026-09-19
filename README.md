@@ -18,7 +18,7 @@ its own `app/*.py` shim.
 
 ## Modules
 
-- `auth` — auth middleware: HTTP Basic (single shared password or multi-user, pluggable) with a brute-force lockout guard, optionally combined with a signed session cookie for OAuth2 login.
+- `auth` — auth middleware: HTTP Basic (single shared password or multi-user, pluggable) with a brute-force lockout guard, optionally combined with a signed session cookie for OAuth2 login. 401/429 responses deliberately omit `WWW-Authenticate: Basic` — every consumer is a JSON API called from a custom SPA login form, and that header makes browsers pop their own native credential dialog on top of the page.
 - `users` / `passwords` — multi-user account store: a `UserMixin` for each app's own model, plus create/authenticate/change-password/delete helpers backed by stdlib PBKDF2 hashing, plus get-or-create for OAuth2 first-login auto-registration.
 - `oauth` — "Sign in with Google/GitHub": authorization-code OAuth2 client plus ready-to-mount login/callback/logout routes.
 - `session_tokens` — stdlib-only signed session tokens (HMAC, no server-side session table) for the OAuth2 login cookie.
@@ -99,6 +99,38 @@ from .config import settings
 _store = QdrantSceneStore(settings.qdrant_url, collection="novel_scenes")
 upsert_scene = _store.upsert_scene
 search = _store.search
+```
+
+```python
+# app/main.py — "Sign in with Google/GitHub", alongside Basic Auth for scripts/CI
+from editor_common.auth import make_auth_middleware, make_session_verifier
+from editor_common.oauth import register_oauth_routes, google_provider
+from editor_common.users import get_or_create_oauth_user
+from .db import SessionLocal
+from .models import User
+
+AuthMiddleware = make_auth_middleware(
+    authenticate_basic=_authenticate,  # from the app/auth.py snippet above
+    verify_session=make_session_verifier(settings.session_secret, SessionLocal, User),
+    public_path_prefixes=("/auth",),  # keep the login/callback/logout routes themselves reachable
+)
+app.add_middleware(AuthMiddleware)
+
+def _get_or_create_user(email, name):
+    db = SessionLocal()
+    try:
+        return get_or_create_oauth_user(db, User, email, display_name=name)
+    finally:
+        db.close()
+
+register_oauth_routes(
+    app,
+    providers={"google": google_provider(settings.google_client_id, settings.google_client_secret,
+                                          redirect_uri=f"{settings.public_base_url}/auth/callback/google")},
+    session_secret=settings.session_secret,
+    get_or_create_user=_get_or_create_user,
+    session_max_age_seconds=30 * 24 * 3600,
+)
 ```
 
 See each module's docstring for the rest of the constructor arguments, and
