@@ -7,7 +7,7 @@ name = "editor-common"
 version = "0.1.0"
 description = "Shared FastAPI backend building blocks for integrated_writers_editor and integrated_novel_editor"
 readme = "README.md"
-license = "MIT"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [

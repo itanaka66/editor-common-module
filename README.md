@@ -173,4 +173,4 @@ both `integrated_writers_editor` and `integrated_novel_editor`.
 
 ## License
 
-[MIT](LICENSE)
+[GNU GPLv3](LICENSE) — Copyright (C) 2026 agNedia Inc. (株式会社エージーネディア)
