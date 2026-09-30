@@ -42,9 +42,10 @@ def test_qdrant(url: str) -> tuple[bool, str, int]:
     return _timed(run)
 
 
-def test_ollama(url: str, model: str | None = None) -> tuple[bool, str, int]:
+def test_ollama(url: str, model: str | None = None, api_key: str | None = None) -> tuple[bool, str, int]:
     def run():
-        r = httpx.get(url.rstrip('/') + '/api/tags', timeout=TIMEOUT_SECONDS)
+        headers = {'Authorization': f'Bearer {api_key}'} if api_key else None
+        r = httpx.get(url.rstrip('/') + '/api/tags', headers=headers, timeout=TIMEOUT_SECONDS)
         r.raise_for_status()
         names = [m.get('name', '') for m in r.json().get('models', [])]
         if model and not any(n == model or n.startswith(model + ':') or n.split(':')[0] == model.split(':')[0] for n in names):
