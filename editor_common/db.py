@@ -25,7 +25,16 @@ class Database:
 
 
 def create_db(database_url: str) -> Database:
-    engine = create_engine(database_url, pool_pre_ping=True)
+    # SQLite only: each pooled connection must stay pinned to the thread
+    # that opened it (the sqlite3 module's own rule) unless told otherwise
+    # — but SQLAlchemy's default pool for a file/:memory: URL can hand a
+    # connection out to a different thread than the one that created it
+    # (FastAPI runs sync request handlers in a thread pool), which raises
+    # "SQLite objects created in a thread can only be used in that same
+    # thread" the moment that happens. Postgres/MySQL connections have no
+    # such restriction, so this only ever applies to sqlite:// URLs.
+    connect_args = {'check_same_thread': False} if database_url.startswith('sqlite') else {}
+    engine = create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
     class Base(DeclarativeBase):
