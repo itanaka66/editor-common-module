@@ -8,6 +8,13 @@ timeout) only — an HTTP error status from Ollama itself (e.g. 404 unknown
 model) is retried too since it's usually the model still loading, but this
 is capped at a couple of attempts so a genuinely bad request fails fast
 rather than hanging the caller for minutes.
+
+`api_key`, on every function here, is entirely optional: a bare local
+`ollama serve` has no auth at all. It exists for the increasingly common
+case of Ollama sitting behind something that does check one — a reverse
+proxy (e.g. an API-key-gated Nginx in front of a shared GPU box), Ollama's
+own hosted/cloud offering, or an OpenAI-API-compatible gateway in front of
+it — sent as a standard `Authorization: Bearer <api_key>` header.
 """
 import asyncio
 import json
@@ -21,12 +28,16 @@ MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2
 
 
-async def _post_with_retry(url, json, timeout):
+def _headers(api_key: str | None) -> dict:
+    return {'Authorization': f'Bearer {api_key}'} if api_key else {}
+
+
+async def _post_with_retry(url, json, timeout, headers=None):
     last_error = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             async with httpx.AsyncClient(timeout=timeout) as c:
-                r = await c.post(url, json=json)
+                r = await c.post(url, json=json, headers=headers)
                 r.raise_for_status()
                 return r
         except (httpx.TransportError, httpx.HTTPStatusError) as ex:
@@ -48,28 +59,30 @@ def _payload(model, prompt, stream, options):
     return payload
 
 
-async def generate(prompt, model, url, timeout=240, options=None):
+async def generate(prompt, model, url, timeout=240, options=None, api_key=None):
     base = url.rstrip('/')
-    r = await _post_with_retry(base + '/api/generate', _payload(model, prompt, False, options), timeout)
+    r = await _post_with_retry(base + '/api/generate', _payload(model, prompt, False, options), timeout, _headers(api_key))
     return r.json().get('response', ''), model
 
 
-async def generate_with_usage(prompt, model, url, timeout=240, options=None):
+async def generate_with_usage(prompt, model, url, timeout=240, options=None, api_key=None):
     """Same as generate(), but also returns Ollama's own token counts
     (prompt_eval_count/eval_count) so callers can log usage."""
     base = url.rstrip('/')
-    r = await _post_with_retry(base + '/api/generate', _payload(model, prompt, False, options), timeout)
+    r = await _post_with_retry(base + '/api/generate', _payload(model, prompt, False, options), timeout, _headers(api_key))
     data = r.json()
     usage = {'input_tokens': data.get('prompt_eval_count'), 'output_tokens': data.get('eval_count')}
     return data.get('response', ''), model, usage
 
 
-async def stream_generate(prompt, model, url, timeout=240, options=None):
+async def stream_generate(prompt, model, url, timeout=240, options=None, api_key=None):
     """Yields response text deltas as they arrive, then a final usage dict."""
     base = url.rstrip('/')
     usage = {'input_tokens': None, 'output_tokens': None}
     async with httpx.AsyncClient(timeout=timeout) as c:
-        async with c.stream('POST', base + '/api/generate', json=_payload(model, prompt, True, options)) as r:
+        async with c.stream(
+            'POST', base + '/api/generate', json=_payload(model, prompt, True, options), headers=_headers(api_key),
+        ) as r:
             r.raise_for_status()
             async for line in r.aiter_lines():
                 if not line:
@@ -82,6 +95,6 @@ async def stream_generate(prompt, model, url, timeout=240, options=None):
     yield {'done': True, 'model': model, 'usage': usage}
 
 
-async def embed(texts, model, url, timeout=180):
-    r = await _post_with_retry(url.rstrip('/') + '/api/embed', {'model': model, 'input': texts}, timeout)
+async def embed(texts, model, url, timeout=180, api_key=None):
+    r = await _post_with_retry(url.rstrip('/') + '/api/embed', {'model': model, 'input': texts}, timeout, _headers(api_key))
     return r.json()['embeddings']
